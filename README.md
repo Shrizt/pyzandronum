@@ -1,3 +1,11 @@
+# Shrizt fork improvements
+- Fixed request packet for modern x64 systems 
+- Fixed server.response_time calculation to determine server ping correctly
+- Added check - what server return (if server return not all requested info - program crashes before) and process only received info
+- Added possibility to query only needed info (see example in root) using flags like 
+        server.query(RequestFlags.SQF_NAME | RequestFlags.SQF_MAPNAME)
+- minor fixes
+
 # pyzandronum
 
 <p align="center">

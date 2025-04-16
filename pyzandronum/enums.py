@@ -59,6 +59,12 @@ class RequestFlags(enum.Flag):
     SQF_DEH = 0x40000000
     SQF_EXTENDED_INFO = 0x80000000
 
+    SQF2_PWAD_HASHES = 0x00000001
+    SQF2_COUNTRY = 0x00000002
+    SQF2_GAMEMODE_NAME = 0x00000004
+    SQF2_GAMEMODE_SHORTNAME = 0x00000008
+    SQF2_VOICECHAT = 0x00000010
+
     @classmethod
     def all(self):
         retval = self.NONE

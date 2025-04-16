@@ -1,11 +1,24 @@
 import struct
 import socket
 import time
+from datetime import datetime, timedelta
 
 from . import enums
 from . import huffman
 from . import exceptions
 from .player import Player
+
+
+def time_ms_int32():
+        # 1. Get "beginning of yesterday" in milliseconds since epoch
+    yesterday_midnight = datetime.now().replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ) - timedelta(days=1)
+    
+    BASE_TIMESTAMP = int(yesterday_midnight.timestamp() * 1000)  # Convert to ms
+
+    current_ms = int(time.time() * 1000)
+    return (current_ms - BASE_TIMESTAMP)  # Now fits in 32-bit better
 
 
 class Server:
@@ -65,7 +78,7 @@ class Server:
             'optional_pwads_count': None,
             'optional_pwads': None,
             'deh_loaded': None,
-            'deh_list': None
+            'deh_list': None,            
         }
         self.players: list[Player] = []
 
@@ -85,9 +98,13 @@ class Server:
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self._sock.close()
 
-    def query(self) -> "Server":
+    def query(self, request_flags: enums.RequestFlags | None = None) -> "Server":
         """
-        Requests server query to fetch server infomation.
+        Requests server query to fetch server information.
+        
+        Args:
+            request_flags: Optional flags specifying what information to request.
+                        If None, uses the default flags (self._request_flags).
         """
         # Our request packet is 3 32-bit integers in a row, for a total of
         # 12 bytes (32 bit = 4 bytes). They must be converted to the "byte"
@@ -96,17 +113,22 @@ class Server:
         # (concatenated, not added).
 
         # Launcher challenge
-        request = struct.pack('l', 199)
+        request = struct.pack('<l', 199)
         # Desired information
-        request += struct.pack('l', self._request_flags)
+        # Use provided flags or fall back to default
+        if request_flags is not None:
+            flags_to_use = request_flags.value  
+        else: flags_to_use = enums.RequestFlags.default().value
+        request += struct.pack('<l', flags_to_use)        
+
         # Current time, this will be sent back to you so you can determine ping
-        request += struct.pack('l', int(time.time()))
+        request += struct.pack('<l', time_ms_int32()) #fixed to msec
 
         # Compress query request with the Huffman algorithm
         request_encoded = self._huffman.encode(request)
 
         # Send the query request to Zandronum server
-        self._sock.sendto(request_encoded, (self.address, self.port))
+        self._sock.sendto(request_encoded, (self.address, self.port))        
         data, server = self._sock.recvfrom(self._buffsize)
         self._raw_data = self._huffman.decode(data)
 
@@ -125,9 +147,9 @@ class Server:
 
         # 0: Get server response header and time stamp (both 4 byte long ints)
         # Server response
-        self.response = self._next_bytes(4)
-        # Time which you sent to the server
-        self.response_time = self._next_bytes(4)
+        self.response = self._next_bytes_int(4)
+        # Now - Time which you sent to the server  = Response time / Ping
+        self.response_time = time_ms_int32() - self._next_bytes_int(4)        
 
         # Checking server response magic number
         if self.response != enums.Response.ACCEPTED.value:
@@ -142,128 +164,125 @@ class Server:
         self.query_dict['version'] = self._next_string()
 
         # 2: Our flags are repeated back to us (long int)
-        self.response_flags = self._next_bytes(4)
+        self.response_flags = self._next_bytes_int(4)
+        response_flags_enums = enums.RequestFlags(self.response_flags)
 
-        # 3: Flags
-        # The server's name (sv_hostname)
-        self.query_dict['hostname'] = self._next_string()
-        # The server's WAD URL (sv_website)
-        self.query_dict['url'] = self._next_string()
-        # The server host's e-mail (sv_hostemail)
-        self.query_dict['hostemail'] = self._next_string()
-        # The current map's name
-        self.query_dict['map'] = self._next_string()
-        # The max number of clients (sv_maxclients)
-        self.query_dict['maxclients'] = self._next_bytes(1)
-        # The max number of players (sv_maxplayers)
-        self.query_dict['maxplayers'] = self._next_bytes(1)
-        # The number of PWADs loaded
-        self.query_dict['pwads_loaded'] = self._next_bytes(1)
-        # The PWAD's name (sent for each PWAD)
-        self.query_dict['pwads_list'] = []
-        if int(self.query_dict['pwads_loaded']) > 0:
-            for i in range(0, self.query_dict['pwads_loaded']):
-                self.query_dict['pwads_list'].append(self._next_string())
-        # The current gamemode
-        self.query_dict['gamemode'] = enums.Gamemode(self._next_bytes(1))
-        # Sets teamgame boolean if gamemode with teams
-        if self.query_dict['gamemode'] in [
-            enums.Gamemode.TEAMPLAY,
-            enums.Gamemode.TEAMLMS,
-            enums.Gamemode.TEAMPOSSESSION
-        ]:
-            self.query_dict['teamgame'] = True
-        else:
-            self.query_dict['teamgame'] = False
-        # Instagib
-        if self._next_bytes(1) == 1:
-            self.query_dict['instagib'] = True
-        else:
-            self.query_dict['instagib'] = False
-        # Buckshot
-        if self._next_bytes(1) == 1:
-            self.query_dict['buckshot'] = True
-        else:
-            self.query_dict['buckshot'] = False
-        # The game's name ("DOOM", "DOOM II", "HERETIC", "HEXEN", "ERROR!")
-        self.query_dict['gamename'] = self._next_string()
-        # The IWAD's name
-        self.query_dict['iwad'] = self._next_string()
-        # Whether a password is required to join the server
-        if self._next_bytes(1) == 1:
-            self.query_dict['forcepassword'] = True
-        else:
-            self.query_dict['forcepassword'] = False
-        # Whether a password is required to join the game
-        if self._next_bytes(1) == 1:
-            self.query_dict['forcejoinpassword'] = True
-        else:
-            self.query_dict['forcejoinpassword'] = False
-        # The game's difficulty (skill)
-        self.query_dict['skill'] = self._next_bytes(1)
-        # The bot difficulty (botskill)
-        self.query_dict['botskill'] = self._next_bytes(1)
-        # Value of fraglimit
-        self.query_dict['fraglimit'] = self._next_bytes(2)
-        # Value of timelimit
-        self.query_dict['timelimit'] = self._next_bytes(2)
-        # Time left in minutes (only sent if timelimit > 0)
-        self.query_dict['timelimit_left'] = 0
-        if self.query_dict['timelimit'] != 0:
-            self.query_dict['timelimit_left'] = self._next_bytes(2)
-        # Duel limit (duellimit)
-        self.query_dict['duellimit'] = self._next_bytes(2)
-        # Point limit (pointlimit)
-        self.query_dict['pointlimit'] = self._next_bytes(2)
-        # Win limit (winlimit)
-        self.query_dict['winlimit'] = self._next_bytes(2)
-        # The number of players in the server
-        self.query_dict['numplayers'] = self._next_bytes(1)
-        # Player datas
-        if self.query_dict['numplayers'] > 0:
-            for i in range(0, int(self.query_dict['numplayers'])):
-                self.players.append(Player(
-                    self._raw_data,
-                    self._bytepos,
-                    self.query_dict['teamgame']
-                ))
-                self._bytepos = self.players[i]._bytepos
-        # Whether this server is running a testing binary
-        if self._next_bytes(1):
-            self.query_dict['testing_server'] = True
-        else:
-            self.query_dict['testing_server'] = False
-        # An empty string in case the server is running a stable binary,
-        # otherwise name of the testing binary
-        self.query_dict['testing_server_archive'] = self._next_string()
-        # The number of flags that will be sent
-        self.query_dict['dmflags_number'] = self._next_bytes(1)
-        # The values of the flags (SQF_ALL_DMFLAGS)
-        self.query_dict['dmflags'] = self._next_bytes(4)
-        self.query_dict['dmflags2'] = self._next_bytes(4)
-        self.query_dict['zadmflags'] = self._next_bytes(4)
-        self.query_dict['compatflags'] = self._next_bytes(4)
-        self.query_dict['zacompatflags'] = self._next_bytes(4)
-        self.query_dict['compatflags2'] = self._next_bytes(4)
-        # Whether the server is enforcing the master ban list. (boolean)
-        # The other bits of this byte may be used to transfer other
-        # security related settings in the future.
-        self.query_dict['security_settings'] = self._next_bytes(1)
-        # Amount of optional wad indices that follow
-        self.query_dict['optional_pwads_count'] = self._next_bytes(1)
-        # The optional PWAD's name (sent for each PWAD)
-        self.query_dict['optional_pwads'] = []
-        if self.query_dict['optional_pwads_count'] > 0:
-            for i in range(0, self.query_dict['optional_pwads_count']):
-                self.query_dict['optional_pwads'].append(self._next_string())
-        # Amount of DEHACKED (*.deh) patches loaded
-        self.query_dict['deh_loaded'] = self._next_bytes(1)
-        # DEHACKED patch name (one string for each .deh patch)
-        self.query_dict['deh_list'] = []
-        if self.query_dict['deh_loaded'] > 0:
-            for i in range(0, self.query_dict['deh_loaded']):
-                self.query_dict['deh_list'].append(self._next_string())
-        # End of raw query data.
+        # Now parse the response based on the response flags
+        #self.query_dict = {}
+
+        if response_flags_enums & enums.RequestFlags.SQF_NAME:
+            self.query_dict['hostname'] = self._next_string()
+            
+        if response_flags_enums & enums.RequestFlags.SQF_URL:
+            self.query_dict['url'] = self._next_string()
+            
+        if response_flags_enums & enums.RequestFlags.SQF_EMAIL:
+            self.query_dict['hostemail'] = self._next_string()
+            
+        if response_flags_enums & enums.RequestFlags.SQF_MAPNAME:
+            self.query_dict['map'] = self._next_string()
+            
+        if response_flags_enums & enums.RequestFlags.SQF_MAXCLIENTS:
+            self.query_dict['maxclients'] = self._next_bytes_int(1)
+            
+        if response_flags_enums & enums.RequestFlags.SQF_MAXPLAYERS:
+            self.query_dict['maxplayers'] = self._next_bytes_int(1)
+            
+        if response_flags_enums & enums.RequestFlags.SQF_PWADS:
+            self.query_dict['pwads_loaded'] = self._next_bytes_int(1)
+            self.query_dict['pwads_list'] = []
+            if 'pwads_loaded' in self.query_dict and int(self.query_dict['pwads_loaded']) > 0:
+                for i in range(0, self.query_dict['pwads_loaded']):
+                    self.query_dict['pwads_list'].append(self._next_string())
+            
+        if response_flags_enums & enums.RequestFlags.SQF_GAMETYPE:
+            self.query_dict['gamemode'] = enums.Gamemode(self._next_bytes_int(1))
+            # Set teamgame flag based on gamemode
+            if 'gamemode' in self.query_dict and self.query_dict['gamemode'] in [
+                enums.Gamemode.TEAMPLAY,
+                enums.Gamemode.TEAMLMS,
+                enums.Gamemode.TEAMPOSSESSION
+            ]:
+                self.query_dict['teamgame'] = True
+            else:
+                self.query_dict['teamgame'] = False
+                
+            # Instagib and Buckshot flags are part of gametype info
+            self.query_dict['instagib'] = self._next_bytes_int(1) == 1
+            self.query_dict['buckshot'] = self._next_bytes_int(1) == 1
+            
+        if response_flags_enums & enums.RequestFlags.SQF_GAMENAME:
+            self.query_dict['gamename'] = self._next_string()
+            
+        if response_flags_enums & enums.RequestFlags.SQF_IWAD:
+            self.query_dict['iwad'] = self._next_string()
+            
+        if response_flags_enums & enums.RequestFlags.SQF_FORCEPASSWORD:
+            self.query_dict['forcepassword'] = self._next_bytes_int(1) == 1
+            
+        if response_flags_enums & enums.RequestFlags.SQF_FORCEJOINPASSWORD:
+            self.query_dict['forcejoinpassword'] = self._next_bytes_int(1) == 1
+            
+        if response_flags_enums & enums.RequestFlags.SQF_GAMESKILL:
+            self.query_dict['skill'] = self._next_bytes_int(1)
+            
+        if response_flags_enums & enums.RequestFlags.SQF_BOTSKILL:
+            self.query_dict['botskill'] = self._next_bytes_int(1)
+            
+        if response_flags_enums & enums.RequestFlags.SQF_LIMITS:
+            self.query_dict['fraglimit'] = self._next_bytes_int(2)
+            self.query_dict['timelimit'] = self._next_bytes_int(2)
+            if 'timelimit' in self.query_dict and self.query_dict['timelimit'] != 0:
+                self.query_dict['timelimit_left'] = self._next_bytes_int(2)
+            self.query_dict['duellimit'] = self._next_bytes_int(2)
+            self.query_dict['pointlimit'] = self._next_bytes_int(2)
+            self.query_dict['winlimit'] = self._next_bytes_int(2)
+        if response_flags_enums & enums.RequestFlags.SQF_TEAMDAMAGE:
+            self.query_dict['teamdamage'] = self._next_bytes_int(4)
+        if response_flags_enums & enums.RequestFlags.SQF_NUMPLAYERS:
+            self.query_dict['numplayers'] = self._next_bytes_int(1)
+            
+        if response_flags_enums & enums.RequestFlags.SQF_PLAYERDATA and 'numplayers' in self.query_dict:
+            self.players = []
+            if self.query_dict['numplayers'] > 0:
+                teamgame = self.query_dict.get('teamgame', False)
+                for i in range(0, int(self.query_dict['numplayers'])):
+                    self.players.append(Player(
+                        self._raw_data,
+                        self._bytepos,
+                        teamgame
+                    ))
+                    self._bytepos = self.players[i]._bytepos
+                    
+        if response_flags_enums & enums.RequestFlags.SQF_TESTING_SERVER:
+            self.query_dict['testing_server'] = self._next_bytes_int(1) == 1
+            self.query_dict['testing_server_archive'] = self._next_string()
+            
+        if response_flags_enums & enums.RequestFlags.SQF_ALL_DMFLAGS:
+            self.query_dict['dmflags_number'] = self._next_bytes_int(1)
+            self.query_dict['dmflags'] = self._next_bytes_int(4)
+            self.query_dict['dmflags2'] = self._next_bytes_int(4)
+            self.query_dict['zadmflags'] = self._next_bytes_int(4)
+            self.query_dict['compatflags'] = self._next_bytes_int(4)
+            self.query_dict['zacompatflags'] = self._next_bytes_int(4)
+            self.query_dict['compatflags2'] = self._next_bytes_int(4)
+            
+        if response_flags_enums & enums.RequestFlags.SQF_SECURITY_SETTINGS:
+            self.query_dict['security_settings'] = self._next_bytes_int(1)
+            
+        if response_flags_enums & enums.RequestFlags.SQF_OPTIONAL_WADS:
+            self.query_dict['optional_pwads_count'] = self._next_bytes_int(1)
+            self.query_dict['optional_pwads'] = []
+            if 'optional_pwads_count' in self.query_dict and self.query_dict['optional_pwads_count'] > 0:
+                for i in range(0, self.query_dict['optional_pwads_count']):
+                    self.query_dict['optional_pwads'].append(self._next_string())
+                    
+        if response_flags_enums & enums.RequestFlags.SQF_DEH:
+            self.query_dict['deh_loaded'] = self._next_bytes_int(1)
+            self.query_dict['deh_list'] = []
+            if 'deh_loaded' in self.query_dict and self.query_dict['deh_loaded'] > 0:
+                for i in range(0, self.query_dict['deh_loaded']):
+                    self.query_dict['deh_list'].append(self._next_string())
 
         # TODO: SQF2 extended flags
 
@@ -397,7 +416,7 @@ class Server:
         """:class:`str`: Returns the host's E-Mail address."""
         return self.query_dict['hostemail']
 
-    def _next_bytes(self, bytes_length: int):
+    def _next_bytes_int(self, bytes_length: int):
         ret_int = int.from_bytes(
             self._raw_data[self._bytepos:self._bytepos + bytes_length],
             byteorder='little', signed=False
